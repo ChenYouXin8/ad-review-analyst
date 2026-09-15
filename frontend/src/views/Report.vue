@@ -11,8 +11,10 @@
       <el-date-picker v-if="reportType === 'weekly'" v-model="weeklyDate" type="date" placeholder="结束日期" style="margin-right: 16px" />
       <el-date-picker v-if="reportType === 'custom'" v-model="dateRange" type="daterange" range-separator="至" start-placeholder="开始" end-placeholder="结束" style="margin-right: 16px" />
       <el-button type="primary" :loading="loading" @click="generate">生成报告</el-button>
+      <el-button @click="$router.push('/history')">查看历史报告</el-button>
     </div>
-    <div v-if="report" class="card">
+
+    <div v-if="report" class="card" v-loading="loading">
       <h3>📊 数据概览</h3><p style="line-height:1.8">{{ report.overview }}</p>
       <el-divider />
       <h3>⚠️ 异常诊断 ({{ report.abnormalItems?.length || 0 }})</h3>
@@ -23,11 +25,22 @@
         <el-table-column prop="suggestion" label="建议" />
       </el-table>
       <el-divider />
+      <h3>💰 预算分配建议</h3>
+      <el-table :data="report.budgetSuggestion?.allocations" stripe size="small">
+        <el-table-column prop="campaignName" label="计划" width="180" />
+        <el-table-column label="当前消耗(元)" width="120"><template #default="{ row }">¥{{ row.currentBudget?.toFixed(0) }}</template></el-table-column>
+        <el-table-column label="建议预算(元)" width="120"><template #default="{ row }">¥{{ row.suggestedBudget?.toFixed(0) }}</template></el-table-column>
+        <el-table-column label="调整比例" width="100"><template #default="{ row }"><span :class="(row.adjustRatio ?? 1) >= 1 ? 'tag-low' : 'tag-high'">{{ ((row.adjustRatio ?? 1) * 100).toFixed(0) }}%</span></template></el-table-column>
+        <el-table-column prop="reason" label="原因" />
+      </el-table>
+      <el-divider />
       <h3>💡 AI 策略建议</h3>
       <ol style="padding-left:20px;line-height:2"><li v-for="(s,i) in report.suggestions" :key="i">{{ s }}</li></ol>
       <el-divider />
       <h3>📈 深度分析</h3>
       <div style="white-space:pre-wrap;line-height:1.8">{{ report.aiAnalysis }}</div>
+      <el-divider />
+      <el-button type="primary" link @click="$router.push('/report/' + report.reportId)">查看完整报告详情 →</el-button>
     </div>
   </div>
 </template>
@@ -55,7 +68,7 @@ const generate = async () => {
     }
     report.value = res.data
     ElMessage.success('报告生成成功')
-  } catch (e) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(e.message || '报告生成失败') }
   finally { loading.value = false }
 }
 </script>

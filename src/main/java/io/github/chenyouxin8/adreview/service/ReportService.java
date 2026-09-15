@@ -5,6 +5,7 @@ import io.github.chenyouxin8.adreview.constant.ReportType;
 import io.github.chenyouxin8.adreview.model.AccountSummary;
 import io.github.chenyouxin8.adreview.model.AdCampaign;
 import io.github.chenyouxin8.adreview.model.NaturalQueryResult;
+import io.github.chenyouxin8.adreview.model.PageResult;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -16,6 +17,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Service
@@ -54,8 +56,14 @@ public class ReportService {
     }
 
     private ReviewReport generateReport(LocalDate startDate, LocalDate endDate, ReportType type) {
+        if (startDate.isAfter(endDate)) {
+            throw new BusinessException(40002, "开始日期不能晚于结束日期");
+        }
+        if (startDate.isBefore(LocalDate.now().minusYears(5)) || endDate.isAfter(LocalDate.now())) {
+            throw new BusinessException(40003, "日期范围超出允许区间（最多追溯 5 年，且不能晚于今天）");
+        }
         List<AdCampaign> campaigns = qianchuanService.getCampaignReports(startDate, endDate);
-        AccountSummary summary = qianchuanService.getAccountSummary(endDate);
+        AccountSummary summary = qianchuanService.getAccountSummary(startDate, endDate);
         if (campaigns.isEmpty()) throw new BusinessException(40001, "该时间段内没有投放数据");
 
         List<ReviewReport.AbnormalItem> abnormalities = analysisService.detectAbnormalities(campaigns);
@@ -123,14 +131,18 @@ public class ReportService {
     }
 
     public NaturalQueryResult naturalQuery(String question, LocalDate date) {
+        if (question == null || question.isBlank()) {
+            throw new BusinessException(40004, "查询问题不能为空");
+        }
         List<AdCampaign> campaigns = qianchuanService.getCampaignReports(date, date);
-        AccountSummary summary = qianchuanService.getAccountSummary(date);
+        AccountSummary summary = qianchuanService.getAccountSummary(date, date);
         StringBuilder data = new StringBuilder();
         data.append("账户汇总：消耗").append(String.format("%.2f", summary.getTotalCost())).append("元，ROI").append(String.format("%.2f", summary.getOverallRoi())).append("\n");
         for (AdCampaign c : campaigns) data.append("- ").append(c.getCampaignName()).append(": 消耗").append(String.format("%.0f", c.getCost())).append("元，ROI").append(String.format("%.2f", c.getPayOrderRoi())).append("\n");
         String prompt = String.format("你是千川投流数据助手，用户问：%s\n数据：%s\n请直接回答，200字内。", question, data);
         NaturalQueryResult result = new NaturalQueryResult();
         result.setQuestion(question);
+        result.setIntent(detectIntent(question));
         result.setData(data.toString());
         try { result.setAnswer(chatClient.prompt().user(prompt).call().content()); }
         catch (Exception e) { result.setAnswer("AI服务不可用，今日消耗" + String.format("%.2f", summary.getTotalCost()) + "元，ROI" + String.format("%.2f", summary.getOverallRoi())); }
@@ -138,6 +150,23 @@ public class ReportService {
         return result;
     }
 
-    public List<ReviewReport> getHistoryReports(int page, int size) { return storageService.listReports(page, size); }
+    /**
+     * 简单规则识别查询意图，供前端展示和后续扩展
+     */
+    private String detectIntent(String question) {
+        String q = question.toLowerCase(Locale.ROOT);
+        if (q.contains("暂停") || q.contains("废") || q.contains("跑") || q.contains("停")) return "abnormal_detect";
+        if (q.contains("消耗") || q.contains("花钱") || q.contains("花费")) return "cost_analysis";
+        if (q.contains("roi") || q.contains("投产")) return "roi_analysis";
+        if (q.contains("转化") || q.contains("下单")) return "conversion_analysis";
+        if (q.contains("点击") || q.contains("ctr")) return "traffic_analysis";
+        if (q.contains("对比") || q.contains("哪个") || q.contains("最好") || q.contains("最差")) return "campaign_compare";
+        return "general";
+    }
+
+    public PageResult<ReviewReport> getHistoryReports(int page, int size) {
+        return new PageResult<>(storageService.listReports(page, size), storageService.countReports(), page, size);
+    }
     public ReviewReport getReportById(String reportId) { return storageService.getReport(reportId); }
+    public void deleteReport(String reportId) { storageService.deleteReport(reportId); }
 }

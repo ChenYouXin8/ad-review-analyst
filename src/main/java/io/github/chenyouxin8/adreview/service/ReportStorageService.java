@@ -1,7 +1,6 @@
 package io.github.chenyouxin8.adreview.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import tools.jackson.databind.ObjectMapper;
 import io.github.chenyouxin8.adreview.common.BusinessException;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import jakarta.annotation.PostConstruct;
@@ -28,9 +27,11 @@ public class ReportStorageService {
 
     private final ObjectMapper objectMapper;
 
-    public ReportStorageService() {
-        this.objectMapper = new ObjectMapper();
-        this.objectMapper.registerModule(new JavaTimeModule());
+    /**
+     * 注入 Spring Boot 4 自动配置的 Jackson 3 ObjectMapper（已包含 java.time 支持）
+     */
+    public ReportStorageService(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
     }
 
     @PostConstruct
@@ -41,28 +42,54 @@ public class ReportStorageService {
         } catch (IOException e) { log.error("创建存储目录失败", e); }
     }
 
+    private Path resolveReportPath(String reportId) {
+        // 防止路径穿越：reportId 只允许字母数字
+        if (reportId == null || !reportId.matches("^[a-zA-Z0-9-]+$")) {
+            throw new BusinessException(40005, "非法的报告 ID");
+        }
+        return Paths.get(storagePath, reportId + ".json");
+    }
+
     public void saveReport(ReviewReport report) {
         try {
-            Path filePath = Paths.get(storagePath, report.getReportId() + ".json");
+            Path filePath = resolveReportPath(report.getReportId());
             Files.writeString(filePath, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(report));
         } catch (IOException e) { throw new BusinessException(50002, "保存报告失败"); }
     }
 
     public ReviewReport getReport(String reportId) {
         try {
-            Path filePath = Paths.get(storagePath, reportId + ".json");
+            Path filePath = resolveReportPath(reportId);
             if (!Files.exists(filePath)) throw new BusinessException(40401, "报告不存在");
             return objectMapper.readValue(Files.readString(filePath), ReviewReport.class);
-        } catch (IOException e) { throw new BusinessException(50003, "读取报告失败"); }
+        } catch (BusinessException e) { throw e; }
+        catch (IOException e) { throw new BusinessException(50003, "读取报告失败"); }
+    }
+
+    public void deleteReport(String reportId) {
+        try {
+            Path filePath = resolveReportPath(reportId);
+            if (!Files.exists(filePath)) throw new BusinessException(40401, "报告不存在");
+            Files.delete(filePath);
+        } catch (BusinessException e) { throw e; }
+        catch (IOException e) { throw new BusinessException(50004, "删除报告失败"); }
     }
 
     public List<ReviewReport> listReports(int page, int size) {
+        int safePage = Math.max(page, 1);
+        int safeSize = Math.min(Math.max(size, 1), 100);
         try (Stream<Path> paths = Files.list(Paths.get(storagePath))) {
             return paths.filter(p -> p.toString().endsWith(".json"))
                     .sorted(Comparator.comparing(p -> { try { return Files.getLastModifiedTime(p).toInstant(); } catch (IOException e) { return java.time.Instant.MIN; } }, Comparator.reverseOrder()))
-                    .skip((long) (page - 1) * size).limit(size)
+                    .skip((long) (safePage - 1) * safeSize).limit(safeSize)
                     .map(p -> { try { return objectMapper.readValue(Files.readString(p), ReviewReport.class); } catch (IOException e) { return null; } })
                     .filter(r -> r != null).collect(Collectors.toList());
         } catch (IOException e) { return new ArrayList<>(); }
+    }
+
+    public long countReports() {
+        try (Stream<Path> paths = Files.list(Paths.get(storagePath))) {
+            return paths.filter(p -> p.toString().endsWith(".json")).count();
+        } catch (IOException e) { return 0; }
     }
 }

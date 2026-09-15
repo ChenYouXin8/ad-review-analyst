@@ -13,8 +13,6 @@ spring:
         options:
           model: qwen-max
           temperature: 0.3
-  security:
-    api-key: ${API_KEY}
 
 server:
   port: 8124
@@ -40,8 +38,14 @@ knife4j:
   enable: true
 
 ad-review:
+  # 生产环境 Bearer Token 鉴权（未设置则跳过鉴权，开发模式）
+  api-key: ${API_KEY:}
   roi-threshold: 1.5
   cpa-threshold: 100
   ctr-threshold: 1.0
+  # ROI 异常诊断的最低消耗门槛（元），低于该消耗不判异常
+  abnormal-min-cost: 100
+  # 千川数据拉取/AI 调用失败时是否降级为模拟数据（生产环境建议 false）
+  fallback-mock-on-error: true
   daily-report-cron: "0 0 9 * * ?"
   report-storage-path: ./data/reports

@@ -22,11 +22,13 @@ public class AnalysisService {
     private double cpaThreshold;
     @Value("${ad-review.ctr-threshold:1.0}")
     private double ctrThreshold;
+    @Value("${ad-review.abnormal-min-cost:100}")
+    private double abnormalMinCost;
 
     public List<ReviewReport.AbnormalItem> detectAbnormalities(List<AdCampaign> campaigns) {
         List<ReviewReport.AbnormalItem> abnormalities = new ArrayList<>();
         for (AdCampaign c : campaigns) {
-            if (c.getPayOrderRoi() != null && c.getPayOrderRoi() < roiThreshold && c.getCost() > 100) {
+            if (c.getPayOrderRoi() != null && c.getPayOrderRoi() < roiThreshold && c.getCost() != null && c.getCost() > abnormalMinCost) {
                 ReviewReport.AbnormalItem item = new ReviewReport.AbnormalItem();
                 item.setType(AbnormalType.LOW_ROI.getCode());
                 item.setLevel(AbnormalType.LOW_ROI.getDefaultLevel());
@@ -36,7 +38,7 @@ public class AnalysisService {
                 item.setSuggestion("建议暂停计划或降低出价，检查落地页和人群定向");
                 abnormalities.add(item);
             }
-            if (c.getConvertCost() != null && c.getConvertCost() > cpaThreshold && c.getConvertCnt() >= 3) {
+            if (c.getConvertCost() != null && c.getConvertCost() > cpaThreshold && c.getConvertCnt() != null && c.getConvertCnt() >= 3) {
                 ReviewReport.AbnormalItem item = new ReviewReport.AbnormalItem();
                 item.setType(AbnormalType.HIGH_CPA.getCode());
                 item.setLevel(AbnormalType.HIGH_CPA.getDefaultLevel());
@@ -46,7 +48,7 @@ public class AnalysisService {
                 item.setSuggestion("建议优化创意素材，收窄人群定向，降低出价测试");
                 abnormalities.add(item);
             }
-            if (c.getCtr() != null && c.getCtr() < ctrThreshold && c.getShowCnt() > 10000) {
+            if (c.getCtr() != null && c.getCtr() < ctrThreshold && c.getShowCnt() != null && c.getShowCnt() > 10000) {
                 ReviewReport.AbnormalItem item = new ReviewReport.AbnormalItem();
                 item.setType(AbnormalType.LOW_CTR.getCode());
                 item.setLevel(AbnormalType.LOW_CTR.getDefaultLevel());

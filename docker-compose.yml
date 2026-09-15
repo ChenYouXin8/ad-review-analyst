@@ -11,7 +11,6 @@ services:
       AI_DASHSCOPE_API_KEY: "${AI_DASHSCOPE_API_KEY}"
       API_KEY: "${API_KEY:-}"
       QIANCHUAN_ACCESS_TOKEN: "${QIANCHUAN_ACCESS_TOKEN:-}"
-      SPRING_PROFILES_ACTIVE: "local"
     restart: unless-stopped
     volumes:
       - ./data/reports:/app/data/reports

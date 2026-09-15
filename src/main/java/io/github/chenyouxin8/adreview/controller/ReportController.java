@@ -1,6 +1,7 @@
 package io.github.chenyouxin8.adreview.controller;
 
 import io.github.chenyouxin8.adreview.common.ApiResponse;
+import io.github.chenyouxin8.adreview.model.PageResult;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import io.github.chenyouxin8.adreview.service.ReportService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -11,7 +12,6 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
-import java.util.List;
 
 @RestController
 @RequestMapping("/report")
@@ -50,8 +50,8 @@ public class ReportController {
     }
 
     @GetMapping("/list")
-    @Operation(summary = "获取历史报告列表")
-    public ApiResponse<List<ReviewReport>> getHistoryReports(
+    @Operation(summary = "获取历史报告列表（分页）")
+    public ApiResponse<PageResult<ReviewReport>> getHistoryReports(
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "10") int size) {
         return ApiResponse.ok(reportService.getHistoryReports(page, size));
@@ -61,5 +61,12 @@ public class ReportController {
     @Operation(summary = "获取报告详情")
     public ApiResponse<ReviewReport> getReportDetail(@PathVariable String reportId) {
         return ApiResponse.ok(reportService.getReportById(reportId));
+    }
+
+    @DeleteMapping("/{reportId}")
+    @Operation(summary = "删除历史报告")
+    public ApiResponse<Void> deleteReport(@PathVariable String reportId) {
+        reportService.deleteReport(reportId);
+        return ApiResponse.ok();
     }
 }

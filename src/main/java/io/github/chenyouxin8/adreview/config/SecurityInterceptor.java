@@ -22,7 +22,7 @@ public class SecurityInterceptor implements HandlerInterceptor {
     private static final String AUTH_HEADER = "Authorization";
     private static final String BEARER_PREFIX = "Bearer ";
 
-    @Value("${spring.security.api-key:}")
+    @Value("${ad-review.api-key:}")
     private String configuredApiKey;
 
     @Override
