@@ -1,0 +1,33 @@
+services:
+  # ---------- Spring Boot 后端 ----------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ad-review-backend
+    ports:
+      - "8124:8124"
+    environment:
+      AI_DASHSCOPE_API_KEY: "${AI_DASHSCOPE_API_KEY}"
+      API_KEY: "${API_KEY:-}"
+      QIANCHUAN_ACCESS_TOKEN: "${QIANCHUAN_ACCESS_TOKEN:-}"
+      SPRING_PROFILES_ACTIVE: "local"
+    restart: unless-stopped
+    volumes:
+      - ./data/reports:/app/data/reports
+
+  # ---------- Vue 前端 ----------
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: ad-review-frontend
+    ports:
+      - "5174:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+networks:
+  default:
+    name: ad-review-net

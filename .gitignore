@@ -1,0 +1,27 @@
+# 环境变量
+.env
+
+# 数据目录
+data/
+
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 日志
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
