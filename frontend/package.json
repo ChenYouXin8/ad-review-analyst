@@ -1,0 +1,23 @@
+{
+  "name": "ad-review-analyst-frontend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.5",
+    "axios": "^1.6.0",
+    "echarts": "^5.4.3",
+    "dayjs": "^1.11.10",
+    "element-plus": "^2.4.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}
