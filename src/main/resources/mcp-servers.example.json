@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "qianchuan": {
+      "transport": "streamable-http",
+      "url": "https://open.oceanengine.com/mcp/1837698859935771",
+      "headers": {
+        "Authorization": "Bearer ${QIANCHUAN_ACCESS_TOKEN}"
+      }
+    }
+  }
+}
