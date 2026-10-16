@@ -8,13 +8,13 @@ import io.github.chenyouxin8.adreview.model.AdCampaign;
 import io.github.chenyouxin8.adreview.model.AiReportInsight;
 import io.github.chenyouxin8.adreview.model.NaturalQueryResult;
 import io.github.chenyouxin8.adreview.model.PageResult;
+import io.github.chenyouxin8.adreview.model.ReviewConfig;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import io.github.chenyouxin8.adreview.tool.AdDataAnalyticsTools;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -32,19 +32,19 @@ public class ReportService {
     private final QianchuanService qianchuanService;
     private final AnalysisService analysisService;
     private final ReportStorageService storageService;
-
-    @Value("${ad-review.roi-threshold:1.5}")
-    private double roiThreshold;
+    private final ReviewConfig reviewConfig;
 
     @Autowired
     public ReportService(ChatClient.Builder chatClientBuilder,
                          QianchuanService qianchuanService,
                          AnalysisService analysisService,
-                         ReportStorageService storageService) {
+                         ReportStorageService storageService,
+                         ReviewConfig reviewConfig) {
         this.chatClient = chatClientBuilder.build();
         this.qianchuanService = qianchuanService;
         this.analysisService = analysisService;
         this.storageService = storageService;
+        this.reviewConfig = reviewConfig;
     }
 
     public ReviewReport generateDailyReport(LocalDate date) {
@@ -81,7 +81,8 @@ public class ReportService {
         List<ReviewReport.AbnormalItem> abnormalities = analysisService.detectAbnormalities(campaigns);
         List<AdCampaign> topCampaigns = analysisService.getTopCampaigns(campaigns, 5);
         List<AdCampaign> decliningCampaigns = analysisService.getDecliningCampaigns(campaigns, 5);
-        ReviewReport.BudgetSuggestion budgetSuggestion = analysisService.generateBudgetSuggestion(campaigns, summary.getTotalCost() * 1.1);
+        ReviewReport.BudgetSuggestion budgetSuggestion = analysisService.generateBudgetSuggestion(
+                campaigns, summary.getTotalCost() * reviewConfig.getBudgetGrowthFactor());
 
         // 第三步：单次强 Schema 结构化调用，一次产出概览 / 深度分析 / 建议
         AiInsightResult insightResult = generateAiInsight(summary, abnormalities, topCampaigns);

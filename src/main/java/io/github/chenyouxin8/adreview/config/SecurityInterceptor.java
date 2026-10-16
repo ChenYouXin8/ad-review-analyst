@@ -8,6 +8,9 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+
 /**
  * 接口鉴权拦截器
  *
@@ -48,7 +51,9 @@ public class SecurityInterceptor implements HandlerInterceptor {
         }
 
         String token = authHeader.substring(BEARER_PREFIX.length()).trim();
-        if (!configuredApiKey.equals(token)) {
+        // 常量时间比较，防止基于字符逐位比较的计时攻击
+        if (!MessageDigest.isEqual(configuredApiKey.getBytes(StandardCharsets.UTF_8),
+                token.getBytes(StandardCharsets.UTF_8))) {
             log.warn("鉴权失败，来源 IP={}", request.getRemoteAddr());
             writeUnauthorized(response, "Token 无效");
             return false;

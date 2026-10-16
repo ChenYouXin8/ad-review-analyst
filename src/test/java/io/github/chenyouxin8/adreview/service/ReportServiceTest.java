@@ -4,12 +4,12 @@ import io.github.chenyouxin8.adreview.constant.DataSourceType;
 import io.github.chenyouxin8.adreview.model.AccountSummary;
 import io.github.chenyouxin8.adreview.model.AdCampaign;
 import io.github.chenyouxin8.adreview.model.NaturalQueryResult;
+import io.github.chenyouxin8.adreview.model.ReviewConfig;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 
-import java.lang.reflect.Field;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,27 +37,17 @@ class ReportServiceTest {
     private final LocalDate date = LocalDate.now();
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
         qianchuanService = mock(QianchuanService.class);
         storageService = mock(ReportStorageService.class);
 
-        AnalysisService analysisService = new AnalysisService();
-        setField(analysisService, "roiThreshold", 1.5);
-        setField(analysisService, "cpaThreshold", 100.0);
-        setField(analysisService, "ctrThreshold", 1.0);
-        setField(analysisService, "abnormalMinCost", 100.0);
+        AnalysisService analysisService = new AnalysisService(new ReviewConfig());
 
         ChatClient.Builder builder = mock(ChatClient.Builder.class);
         chatClient = mock(ChatClient.class, RETURNS_DEEP_STUBS);
         when(builder.build()).thenReturn(chatClient);
 
-        reportService = new ReportService(builder, qianchuanService, analysisService, storageService);
-    }
-
-    private void setField(Object target, String name, Object value) throws Exception {
-        Field f = target.getClass().getDeclaredField(name);
-        f.setAccessible(true);
-        f.set(target, value);
+        reportService = new ReportService(builder, qianchuanService, analysisService, storageService, new ReviewConfig());
     }
 
     private List<AdCampaign> sampleCampaigns() {

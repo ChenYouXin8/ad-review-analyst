@@ -48,9 +48,11 @@ public class CsvImportService {
     };
 
     private final CampaignRepository campaignRepository;
+    private final QianchuanService qianchuanService;
 
-    public CsvImportService(CampaignRepository campaignRepository) {
+    public CsvImportService(CampaignRepository campaignRepository, QianchuanService qianchuanService) {
         this.campaignRepository = campaignRepository;
+        this.qianchuanService = qianchuanService;
     }
 
     /** 导入结果：成功条数与覆盖的日期范围。 */
@@ -80,6 +82,8 @@ public class CsvImportService {
             throw new BusinessException(40008, "CSV 中未解析到有效数据");
         }
         campaignRepository.upsertAll(campaigns, DataSourceType.LOCAL_IMPORT);
+        // 主动失效取数缓存，保证导入后立即读到最新数据
+        qianchuanService.evictCache();
 
         LocalDate min = campaigns.stream().map(AdCampaign::getStatDate).min(LocalDate::compareTo).orElse(null);
         LocalDate max = campaigns.stream().map(AdCampaign::getStatDate).max(LocalDate::compareTo).orElse(null);

@@ -10,22 +10,25 @@
 ## 功能特性
 
 - **自动复盘报告**：支持日报、周报、自定义时间段报告，一键生成
-- **AI 深度分析**：通义千问大模型分析投放数据，给出专业解读
-- **异常智能诊断**：自动识别 ROI 过低、CPA 过高、CTR 偏低等异常计划（阈值可配置）
+- **AI 深度分析**：通义千问大模型**单次强 Schema 结构化调用**一次性产出概览 / 深度分析 / 行动建议
+- **全套 6 种异常智能诊断**：ROI 过低、CPA 过高、CTR 偏低、预算超支、素材衰退、效果突降，阈值全部可配置
 - **策略建议生成**：基于数据给出预算分配、出价优化、素材优化建议
 - **预算分配建议**：按 ROI 加权自动给出各计划的预算调整比例与原因
-- **自然语言查询**：用大白话问数据，如"今天哪个计划跑废了"，自动识别查询意图
+- **自然语言查询**：用大白话问数据，如"今天哪个计划跑废了"；基于 Spring AI `@Tool` 让大模型**按需调用本地数据工具**获取真实数据后作答
 - **每日定时任务**：每天早上 9 点自动生成前一天日报
-- **报告历史管理**：所有报告本地持久化存储，支持分页回溯查看与删除
-- **真实数据接入**：通过 Spring AI 结构化输出解析千川 MCP 返回数据（未配置 MCP 时自动降级为模拟数据）
+- **报告历史管理**：报告持久化到 **H2 数据库**，`JdbcTemplate` SQL 分页，支持回溯查看与删除
+- **三级数据源路由 + 可信水印**：本地 CSV 导入 > 千川 MCP 实时拉取 > 幂等 Mock 兜底，来源与降级状态透传到前端醒目提示
+- **请求可观测性**：每个请求生成短 `traceId` 写入 MDC 与响应头 `X-Trace-Id`，串联全部业务日志与 AI 调用日志
+- **取数短时缓存**：按日期段内存缓存取数结果（TTL 5 分钟），避免仪表盘高频刷新打穿下游链路
 
 ## 技术栈
 
 | 层级 | 技术 |
 |------|------|
 | 后端框架 | Spring Boot 4.1.0 + Spring AI 2.0.0 |
-| 大模型 | 通义千问 qwen-max |
-| 数据接入 | 巨量千川官方 MCP Server（StreamableHttp） |
+| 大模型 | 通义千问 qwen-max（`BeanOutputConverter` 强 Schema 结构化输出 / `@Tool` Tool Calling） |
+| 数据接入 | 三级路由：千川标准 CSV 导入 + 巨量千川官方 MCP Server（StreamableHttp） + 幂等 Mock 兜底 |
+| 持久化 | H2 文件数据库（`MODE=MySQL`）+ `JdbcTemplate` SQL 分页 |
 | 定时任务 | Spring @Scheduled |
 | 前端 | Vue 3 + Vite + Element Plus + ECharts（按需引入） |
 | 部署 | Docker Compose |
@@ -86,14 +89,18 @@ docker compose down
 |------|------|------|
 | GET | `/api/data/summary` | 获取账户汇总数据（支持时间段） |
 | GET | `/api/data/campaigns` | 获取计划级报表 |
+| POST | `/api/data/import-csv` | 导入千川标准 CSV 报表（中英文表头，UTF-8/GBK 自动识别，导入后自动失效取数缓存） |
+| GET | `/api/data/csv-template` | 下载标准 CSV 导入模板 |
 | GET | `/api/report/daily` | 生成日报 |
 | GET | `/api/report/weekly` | 生成周报 |
 | GET | `/api/report/custom` | 生成自定义时间段报告 |
 | GET | `/api/report/list` | 获取历史报告列表（分页，返回 total） |
 | GET | `/api/report/{id}` | 获取报告详情 |
 | DELETE | `/api/report/{id}` | 删除历史报告 |
-| GET | `/api/query/ask` | 自然语言查询（自动识别意图） |
+| GET | `/api/query/ask` | 自然语言查询（基于 Spring AI Tool Calling，返回数据来源与工具调用轨迹） |
 | GET | `/api/config` | 获取业务阈值配置（供前端展示） |
+
+> 所有响应头均携带 `X-Trace-Id`，可用于在服务端日志中检索该请求的完整调用链路。
 
 ## 项目结构
 
@@ -102,23 +109,27 @@ ad-review-analyst/
 ├── src/main/java/io/github/chenyouxin8/adreview/
 │   ├── AdReviewApplication.java    # 启动类
 │   ├── common/                      # 通用响应、异常处理
-│   ├── config/                      # 配置类（CORS、安全、MVC）
+│   ├── config/                      # 配置类（CORS、安全、MVC、请求追踪过滤器）
 │   ├── controller/                  # REST API 接口
-│   │   ├── DataController.java      # 数据查询
+│   │   ├── DataController.java      # 数据查询 + CSV 导入
 │   │   ├── ReportController.java    # 报告生成与管理
 │   │   ├── QueryController.java     # 自然语言查询
 │   │   └── ConfigController.java    # 阈值配置
 │   ├── service/                     # 业务逻辑
-│   │   ├── QianchuanService.java    # 千川数据拉取（MCP + 结构化输出解析）
-│   │   ├── AnalysisService.java     # 数据分析、异常检测
-│   │   ├── ReportService.java       # 报告生成、AI分析
-│   │   └── ReportStorageService.java # 报告存储（分页/删除）
-│   ├── model/                       # 数据模型（含分页结果、配置）
-│   ├── constant/                    # 枚举常量
+│   │   ├── QianchuanService.java    # 三级数据源路由取数（含 5 分钟内存缓存）
+│   │   ├── CsvImportService.java    # 千川 CSV 报表导入（中英文表头映射）
+│   │   ├── AnalysisService.java     # 数据分析、全套 6 种异常检测
+│   │   ├── ReportService.java       # 报告生成、单次结构化 AI 分析、Tool Calling 问答
+│   │   └── ReportStorageService.java # 报告存储（H2 + JdbcTemplate 分页/删除）
+│   ├── repository/                  # CampaignRepository（H2 批量 Upsert）
+│   ├── tool/                        # AdDataAnalyticsTools（请求级有状态 AI 工具箱）
+│   ├── model/                       # 数据模型（含分页结果、ReviewConfig 阈值配置）
+│   ├── constant/                    # 枚举常量（含 DataSourceType、AbnormalType）
 │   └── job/                         # 定时任务
-├── src/test/java/                   # 单元测试（AnalysisService）
+├── src/test/java/                   # 单元测试（Analysis/CsvImport/Qianchuan/Report/Tools）
 ├── src/main/resources/
-│   ├── application.yml              # 应用配置
+│   ├── application.yml              # 应用配置（含阈值、缓存、CORS、日志 pattern）
+│   ├── schema.sql                   # H2 表结构
 │   └── mcp-servers.example.json     # MCP 配置模板
 ├── frontend/                        # Vue 3 前端
 │   └── src/
@@ -135,10 +146,13 @@ ad-review-analyst/
 
 ## 数据接入说明
 
-配置真实千川 MCP 后，系统通过 AI 模型调用 MCP 工具获取报表数据，并使用 Spring AI 结构化输出（JSON Schema）将结果解析为计划数据模型。
+系统取数采用**三级数据源优先级路由**，并始终把「数据来源」与「是否降级」透传到报告 / 汇总 / 问答结果，前端醒目提示：
 
-- 未配置 MCP 工具时：自动返回模拟数据，方便本地开发测试
-- AI/千川调用失败时：默认降级为模拟数据（可通过 `ad-review.fallback-mock-on-error=false` 关闭降级，让错误直接暴露）
+1. **本地 CSV 导入（LOCAL_IMPORT）**：优先命中。上传千川标准 CSV 报表（支持中英文表头、UTF-8/GBK 自动识别、衍生指标自动计算），数据落库 H2；导入后自动失效取数缓存，立即生效。不消耗 LLM Token。
+2. **千川 MCP 实时数据（MCP_LIVE）**：本地库无该时段数据且 MCP 工具可用时，通过 AI 模型调用千川 MCP 工具取数，并用 `BeanOutputConverter` 强 Schema 结构化输出解析。
+3. **Mock 兜底（MOCK_FALLBACK）**：前两者均不可用时返回**幂等**模拟数据（固定种子保证同一日期查询结果稳定），便于开发演示。可通过 `ad-review.fallback-mock-on-error=false` 关闭降级，让错误直接暴露。
+
+> 导入 CSV：前端页面直接上传，或调用 `POST /api/data/import-csv`；模板下载：`GET /api/data/csv-template`。
 
 ### 巨量千川 MCP 接入
 
@@ -149,21 +163,32 @@ ad-review-analyst/
 
 ## 配置说明
 
+所有业务阈值均集中在 `ad-review.*` 前缀下，由 `ReviewConfig` 统一绑定并经 `GET /api/config` 暴露给前端，代码中无魔法数字。
+
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `ad-review.api-key` | 生产环境 Bearer Token 鉴权（未设置则跳过） | 空 |
 | `ad-review.roi-threshold` | ROI 预警阈值 | 1.5 |
 | `ad-review.cpa-threshold` | CPA 预警阈值（元） | 100 |
 | `ad-review.ctr-threshold` | CTR 预警阈值（%） | 1.0 |
-| `ad-review.abnormal-min-cost` | ROI 异常诊断最低消耗门槛（元） | 100 |
+| `ad-review.abnormal-min-cost` | 异常诊断最低消耗门槛（元） | 100 |
+| `ad-review.top-campaign-min-cost` | 入选 TOP 计划的最低消耗门槛（元） | 200 |
+| `ad-review.declining-campaign-min-cost` | 判定衰退计划的最低消耗门槛（元） | 500 |
+| `ad-review.cpa-min-conversions` | 判定高 CPA 的最小转化数 | 3 |
+| `ad-review.ctr-min-impressions` | 判定低 CTR 的最小展示量 | 10000 |
+| `ad-review.budget-growth-factor` | 默认预算规划乘数 | 1.1 |
+| `ad-review.overspend-ratio-threshold` | 预算超支检测：消耗超过全场平均的倍数 | 2.5 |
+| `ad-review.creative-decay-cpc-multiplier` | 素材衰退检测：CPC 高于全场平均的倍数 | 1.5 |
+| `ad-review.cache-ttl-seconds` | 取数结果内存缓存 TTL（秒） | 300 |
+| `ad-review.cors.allowed-origins` | 跨域允许来源（逗号分隔，环境变量 `CORS_ALLOWED_ORIGINS`） | `*` |
 | `ad-review.fallback-mock-on-error` | 数据拉取失败时降级为模拟数据 | true |
 | `ad-review.daily-report-cron` | 每日自动复盘时间 | 每天 9:00 |
-| `ad-review.report-storage-path` | 报告存储路径 | ./data/reports |
+| `ad-review.report-storage-path` | 报告存储路径（H2 数据目录见 `spring.datasource.url`） | ./data/reports |
 
 ## 测试
 
 ```bash
-./mvnw test        # 运行后端单元测试
+./mvnw.cmd test        # 运行后端单元测试（Windows；*nix 用 ./mvnw test）
 cd frontend && npm run build   # 构建前端
 ```
 
@@ -174,7 +199,7 @@ cd frontend && npm run build   # 构建前端
 - [ ] 素材内容 AI 分析（视频画面/文案拆解）
 - [ ] 自动执行优化操作（暂停计划、调整出价）
 - [ ] 多账户管理和跨账户对比
-- [ ] 数据库存储（MySQL/PostgreSQL）替代本地 JSON
+- [ ] 从 H2 平滑迁移到 MySQL/PostgreSQL（生产级并发与集群）
 
 ## License
 

@@ -19,7 +19,9 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 @Slf4j
@@ -38,6 +40,20 @@ public class QianchuanService {
      */
     @Value("${ad-review.fallback-mock-on-error:true}")
     private boolean fallbackMockOnError;
+
+    /** 数据缓存 TTL（秒），默认 300 秒 = 5 分钟。 */
+    @Value("${ad-review.cache-ttl-seconds:300}")
+    private long cacheTtlSeconds = 300;
+
+    /** 拉取结果内存缓存：Key = {@code startDate_endDate}。 */
+    private final Map<String, CacheEntry> fetchCache = new ConcurrentHashMap<>();
+
+    /** 缓存条目：结果 + 过期时间戳。 */
+    private record CacheEntry(CampaignFetchResult result, long expireAt) {
+        boolean isExpired() {
+            return expireAt < System.currentTimeMillis();
+        }
+    }
 
     @Autowired
     public QianchuanService(ChatClient.Builder chatClientBuilder,
@@ -71,11 +87,31 @@ public class QianchuanService {
      *   <li><b>千川 MCP 实时数据</b>：本地库无该时段数据且 MCP 工具可用 → {@link DataSourceType#MCP_LIVE}；</li>
      *   <li><b>Mock 兜底</b>：前两者均不可用且允许兜底 → {@link DataSourceType#MOCK_FALLBACK}。</li>
      * </ol>
+     * <p>结果按 {@code startDate_endDate} 缓存在内存中（默认 TTL 5 分钟），
+     * 避免仪表盘高频刷新打穿下游取数链路；导入新数据时请调用 {@link #evictCache()} 主动失效。</p>
      */
     public CampaignFetchResult fetchCampaigns(LocalDate startDate, LocalDate endDate) {
         if (startDate.isAfter(endDate)) {
             throw new BusinessException(40002, "开始日期不能晚于结束日期");
         }
+        String cacheKey = startDate + "_" + endDate;
+        CacheEntry cached = fetchCache.get(cacheKey);
+        if (cached != null && !cached.isExpired()) {
+            log.debug("命中千川数据缓存: {}", cacheKey);
+            return cached.result();
+        }
+        CampaignFetchResult result = doFetchCampaigns(startDate, endDate);
+        fetchCache.put(cacheKey, new CacheEntry(result, System.currentTimeMillis() + cacheTtlSeconds * 1000L));
+        return result;
+    }
+
+    /** 清空数据缓存（导入新 CSV 数据后调用，确保立即看到最新数据）。 */
+    public void evictCache() {
+        fetchCache.clear();
+        log.info("已清空千川数据缓存");
+    }
+
+    private CampaignFetchResult doFetchCampaigns(LocalDate startDate, LocalDate endDate) {
         log.info("拉取千川计划报表: {} ~ {}", startDate, endDate);
 
         // 优先级 1：本地已导入的真实数据

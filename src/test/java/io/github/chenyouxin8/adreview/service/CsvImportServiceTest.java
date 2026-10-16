@@ -32,6 +32,7 @@ class CsvImportServiceTest {
             "10001,夏季新品连衣裙-信息流,2026-10-10,2000,50000,1000,50,2500,30\n";
 
     private CampaignRepository campaignRepository;
+    private QianchuanService qianchuanService;
     private CsvImportService csvImportService;
 
     @BeforeEach
@@ -42,7 +43,9 @@ class CsvImportServiceTest {
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
 
         campaignRepository = new CampaignRepository(new JdbcTemplate(dataSource));
-        csvImportService = new CsvImportService(campaignRepository);
+        // MCP provider 为 null（不可用），本地库命中即走 LOCAL_IMPORT，无需真实 LLM
+        qianchuanService = new QianchuanService(mock(ChatClient.Builder.class), null, campaignRepository);
+        csvImportService = new CsvImportService(campaignRepository, qianchuanService);
     }
 
     private MockMultipartFile csvFile(String content, Charset charset) {
@@ -96,10 +99,7 @@ class CsvImportServiceTest {
     void qianchuanService_prefersLocalImport_overMcp() {
         csvImportService.importCsv(csvFile(HEADER + ROW_1, StandardCharsets.UTF_8));
 
-        ChatClient.Builder builder = mock(ChatClient.Builder.class);
         // MCP provider 为 null（不可用），但因本地库已有数据，应优先命中 LOCAL_IMPORT
-        QianchuanService qianchuanService = new QianchuanService(builder, null, campaignRepository);
-
         QianchuanService.CampaignFetchResult result = qianchuanService.fetchCampaigns(DATE, DATE);
 
         assertEquals(DataSourceType.LOCAL_IMPORT, result.dataSource());
@@ -108,12 +108,23 @@ class CsvImportServiceTest {
 
     @Test
     void qianchuanService_fallsBackToMock_whenNoLocalAndNoMcp() {
-        ChatClient.Builder builder = mock(ChatClient.Builder.class);
-        QianchuanService qianchuanService = new QianchuanService(builder, null, campaignRepository);
-
         QianchuanService.CampaignFetchResult result = qianchuanService.fetchCampaigns(DATE, DATE);
 
         assertEquals(DataSourceType.MOCK_FALLBACK, result.dataSource());
         assertFalse(result.campaigns().isEmpty());
+    }
+
+    @Test
+    void importCsv_evictsQianchuanCache_soDataIsImmediatelyVisible() {
+        // 取数一次 → 缓存为 Mock 兜底数据（本地库为空）
+        QianchuanService.CampaignFetchResult before = qianchuanService.fetchCampaigns(DATE, DATE);
+        assertEquals(DataSourceType.MOCK_FALLBACK, before.dataSource());
+
+        // 导入 CSV 应主动失效缓存，使后续取数立即命中最新导入数据
+        csvImportService.importCsv(csvFile(HEADER + ROW_1, StandardCharsets.UTF_8));
+        QianchuanService.CampaignFetchResult after = qianchuanService.fetchCampaigns(DATE, DATE);
+
+        assertEquals(DataSourceType.LOCAL_IMPORT, after.dataSource());
+        assertEquals(1, after.campaigns().size());
     }
 }

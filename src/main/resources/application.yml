@@ -54,7 +54,30 @@ ad-review:
   ctr-threshold: 1.0
   # ROI 异常诊断的最低消耗门槛（元），低于该消耗不判异常
   abnormal-min-cost: 100
+  # 入选 TOP 计划的最低消耗门槛（元）
+  top-campaign-min-cost: 200
+  # 判定衰退计划的最低消耗门槛（元）
+  declining-campaign-min-cost: 500
+  # 判定高 CPA 的最小转化数
+  cpa-min-conversions: 3
+  # 判定低 CTR 的最小展示量
+  ctr-min-impressions: 10000
+  # 默认预算规划乘数
+  budget-growth-factor: 1.1
+  # 单计划消耗超过全场平均消耗的倍数阈值（预算超支检测）
+  overspend-ratio-threshold: 2.5
+  # 平均点击成本高于全场平均 CPC 的倍数阈值（素材衰退检测）
+  creative-decay-cpc-multiplier: 1.5
   # 千川数据拉取/AI 调用失败时是否降级为模拟数据（生产环境建议 false）
   fallback-mock-on-error: true
+  # 取数结果内存缓存 TTL（秒）
+  cache-ttl-seconds: 300
+  # 跨域允许来源（逗号分隔，默认 * 兼容开发；生产建议通过 CORS_ALLOWED_ORIGINS 收紧）
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:*}
   daily-report-cron: "0 0 9 * * ?"
   report-storage-path: ./data/reports
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-}] %-5level %logger{36} - %msg%n"
