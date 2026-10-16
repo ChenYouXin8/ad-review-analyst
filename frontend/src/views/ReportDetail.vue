@@ -6,6 +6,10 @@
       <template v-else-if="report">
         <div class="card">
           <h2 style="margin-bottom:16px">{{ report.reportType === 'daily' ? '日报' : report.reportType === 'weekly' ? '周报' : '自定义报告' }}<span style="font-size:14px;color:#888;margin-left:12px">{{ report.startDate }} ~ {{ report.endDate }}</span></h2>
+          <el-alert v-if="report.dataSource === 'MOCK_FALLBACK'" type="warning" :closable="false" show-icon
+            title="当前展示为模拟演示数据（未连接千川 MCP）" style="margin-bottom: 16px" />
+          <el-alert v-if="report.degraded === true" type="warning" :closable="false" show-icon
+            title="AI 深度分析服务降级，当前展示为基础规则结论" style="margin-bottom: 16px" />
           <el-row :gutter="16" style="margin-bottom:20px">
             <el-col :span="6"><div class="stat-card"><div class="label">总消耗</div><div class="value">¥{{ report.summary?.totalCost?.toFixed(0) }}</div></div></el-col>
             <el-col :span="6"><div class="stat-card"><div class="label">ROI</div><div class="value" :class="(report.summary?.overallRoi ?? 0) >= 1.5 ? 'positive' : 'negative'">{{ report.summary?.overallRoi?.toFixed(2) }}</div></div></el-col>

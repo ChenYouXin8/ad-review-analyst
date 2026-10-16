@@ -15,6 +15,10 @@
     </div>
 
     <div v-if="report" class="card" v-loading="loading">
+      <el-alert v-if="report.dataSource === 'MOCK_FALLBACK'" type="warning" :closable="false" show-icon
+        title="当前展示为模拟演示数据（未连接千川 MCP）" style="margin-bottom: 16px" />
+      <el-alert v-if="report.degraded === true" type="warning" :closable="false" show-icon
+        title="AI 深度分析服务降级，当前展示为基础规则结论" style="margin-bottom: 16px" />
       <h3>📊 数据概览</h3><p style="line-height:1.8">{{ report.overview }}</p>
       <el-divider />
       <h3>⚠️ 异常诊断 ({{ report.abnormalItems?.length || 0 }})</h3>

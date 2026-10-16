@@ -24,4 +24,8 @@ public class AccountSummary {
     private Integer activeCampaignCount;
     private Integer pausedCampaignCount;
     private Integer abnormalCampaignCount;
+    /** 数据来源类型（DataSourceType.name()） */
+    private String dataSource;
+    /** AI 分析是否降级（默认 false） */
+    private Boolean degraded = false;
 }

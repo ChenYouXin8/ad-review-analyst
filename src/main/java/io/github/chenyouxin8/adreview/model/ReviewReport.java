@@ -24,6 +24,10 @@ public class ReviewReport {
     private List<String> suggestions;
     private BudgetSuggestion budgetSuggestion;
     private String aiAnalysis;
+    /** 数据来源类型（DataSourceType.name()） */
+    private String dataSource;
+    /** AI 分析是否降级（默认 false） */
+    private Boolean degraded = false;
 
     @Data
     public static class AbnormalItem {

@@ -1,6 +1,7 @@
 package io.github.chenyouxin8.adreview.service;
 
 import io.github.chenyouxin8.adreview.common.BusinessException;
+import io.github.chenyouxin8.adreview.constant.DataSourceType;
 import io.github.chenyouxin8.adreview.model.AccountSummary;
 import io.github.chenyouxin8.adreview.model.AdCampaign;
 import lombok.extern.slf4j.Slf4j;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 @Service
 @Slf4j
@@ -43,11 +45,28 @@ public class QianchuanService {
     }
 
     /**
-     * 拉取千川计划报表。
-     * <p>配置了 MCP 工具时，通过 AI + 千川 MCP 工具获取真实数据，并使用结构化输出解析为 {@link AdCampaign} 列表；
-     * 未配置或调用失败时（可配置）返回模拟数据，方便本地开发测试。</p>
+     * 本次取数结果的轻量包装：计划列表 + 明确的数据来源标识，
+     * 使调用方能够区分「真实 MCP 数据」与「Mock 兜底数据」。
+     */
+    public record CampaignFetchResult(List<AdCampaign> campaigns, DataSourceType dataSource) {
+    }
+
+    /**
+     * 拉取千川计划报表（兼容旧签名，仅返回计划列表）。
+     *
+     * @see #fetchCampaigns(LocalDate, LocalDate) 需要数据来源标识时请使用该方法
      */
     public List<AdCampaign> getCampaignReports(LocalDate startDate, LocalDate endDate) {
+        return fetchCampaigns(startDate, endDate).campaigns();
+    }
+
+    /**
+     * 拉取千川计划报表，并显式返回本次数据来源类型。
+     * <p>配置了 MCP 工具时，通过 AI + 千川 MCP 工具获取真实数据，并使用结构化输出解析为
+     * {@link AdCampaign} 列表，来源标记为 {@link DataSourceType#MCP_LIVE}；
+     * 未配置或调用失败时（可配置）返回模拟数据，来源标记为 {@link DataSourceType#MOCK_FALLBACK}。</p>
+     */
+    public CampaignFetchResult fetchCampaigns(LocalDate startDate, LocalDate endDate) {
         if (startDate.isAfter(endDate)) {
             throw new BusinessException(40002, "开始日期不能晚于结束日期");
         }
@@ -55,7 +74,7 @@ public class QianchuanService {
         ToolCallback[] tools = resolveMcpTools();
         if (tools == null) {
             log.warn("千川 MCP 工具不可用，返回模拟数据");
-            return generateMockCampaignData(startDate, endDate);
+            return new CampaignFetchResult(generateMockCampaignData(startDate, endDate), DataSourceType.MOCK_FALLBACK);
         }
         try {
             BeanOutputConverter<List<AdCampaign>> converter =
@@ -72,20 +91,20 @@ public class QianchuanService {
             List<AdCampaign> campaigns = converter.convert(content);
             if (campaigns == null || campaigns.isEmpty()) {
                 log.warn("千川 MCP 返回数据为空，期间 {} ~ {}", startDate, endDate);
-                return new ArrayList<>();
+                return new CampaignFetchResult(new ArrayList<>(), DataSourceType.MCP_LIVE);
             }
             campaigns.forEach(c -> {
                 if (c.getStatDate() == null) c.setStatDate(endDate);
             });
             log.info("千川计划报表解析成功，共 {} 条", campaigns.size());
-            return campaigns;
+            return new CampaignFetchResult(campaigns, DataSourceType.MCP_LIVE);
         } catch (BusinessException e) {
             throw e;
         } catch (Exception e) {
             log.error("拉取千川数据失败", e);
             if (fallbackMockOnError) {
                 log.warn("已降级为模拟数据（可通过 ad-review.fallback-mock-on-error=false 关闭降级）");
-                return generateMockCampaignData(startDate, endDate);
+                return new CampaignFetchResult(generateMockCampaignData(startDate, endDate), DataSourceType.MOCK_FALLBACK);
             }
             throw new BusinessException(50001, "拉取千川数据失败: " + e.getMessage());
         }
@@ -112,10 +131,23 @@ public class QianchuanService {
     }
 
     /**
-     * 按时间段汇总账户数据
+     * 按时间段汇总账户数据。
+     * <p>先取数一次，再委托 {@link #calculateAccountSummary} 在内存中聚合，
+     * 避免内部重复调用 {@link #fetchCampaigns}。</p>
      */
     public AccountSummary getAccountSummary(LocalDate startDate, LocalDate endDate) {
-        List<AdCampaign> campaigns = getCampaignReports(startDate, endDate);
+        CampaignFetchResult result = fetchCampaigns(startDate, endDate);
+        AccountSummary summary = calculateAccountSummary(result.campaigns(), startDate, endDate);
+        summary.setDataSource(result.dataSource().name());
+        summary.setDegraded(false);
+        return summary;
+    }
+
+    /**
+     * 基于已获取的计划列表在内存中聚合账户汇总指标。
+     * <p>该方法是纯计算逻辑，<b>严禁</b>在内部再次触发取数（MCP/LLM 调用）。</p>
+     */
+    public AccountSummary calculateAccountSummary(List<AdCampaign> campaigns, LocalDate startDate, LocalDate endDate) {
         AccountSummary summary = new AccountSummary();
         summary.setAdvertiserId(0L);
         summary.setAdvertiserName("当前账户");
@@ -145,20 +177,27 @@ public class QianchuanService {
         return summary;
     }
 
+    /**
+     * 生成模拟演示数据。
+     * <p>使用基于 {@code (startDate.toEpochDay() + campaignId)} 的固定种子，
+     * 保证同一日期多次查询结果幂等，避免每次刷新数据乱跳。</p>
+     */
     private List<AdCampaign> generateMockCampaignData(LocalDate startDate, LocalDate endDate) {
         List<AdCampaign> list = new ArrayList<>();
         String[] names = {"夏季新品推广-信息流", "品牌词搜索-精准", "达人带货-短视频", "直播间引流-智能", "老客召回-定向", "竞品拦截-广泛"};
         long days = startDate.until(endDate).getDays() + 1;
         for (int i = 0; i < 6; i++) {
+            long campaignId = 10000L + i;
+            Random random = new Random(startDate.toEpochDay() + campaignId);
             AdCampaign c = new AdCampaign();
-            c.setCampaignId(10000L + i);
+            c.setCampaignId(campaignId);
             c.setCampaignName(names[i]);
             c.setStatDate(endDate);
-            long showCnt = (long) (Math.random() * 500000 + 10000);
-            long clickCnt = (long) (showCnt * (Math.random() * 0.05 + 0.01));
-            double cost = Math.random() * 5000 + 500;
-            long convertCnt = (long) (clickCnt * (Math.random() * 0.05 + 0.01));
-            double payAmount = cost * (Math.random() * 3 + 0.5);
+            long showCnt = (long) (random.nextDouble() * 500000 + 10000);
+            long clickCnt = (long) (showCnt * (random.nextDouble() * 0.05 + 0.01));
+            double cost = random.nextDouble() * 5000 + 500;
+            long convertCnt = (long) (clickCnt * (random.nextDouble() * 0.05 + 0.01));
+            double payAmount = cost * (random.nextDouble() * 3 + 0.5);
             c.setShowCnt(showCnt * days);
             c.setClickCnt(clickCnt * days);
             c.setCtr(clickCnt > 0 ? (double) clickCnt / showCnt * 100 : 0);

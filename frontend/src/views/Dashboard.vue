@@ -2,6 +2,11 @@
   <div v-loading="loading">
     <h1 class="page-title">数据概览</h1>
 
+    <el-alert v-if="summary.dataSource === 'MOCK_FALLBACK'" type="warning" :closable="false" show-icon
+      title="当前展示为模拟演示数据（未连接千川 MCP）" style="margin-bottom: 16px" />
+    <el-alert v-if="summary.degraded === true" type="warning" :closable="false" show-icon
+      title="AI 深度分析服务降级，当前展示为基础规则结论" style="margin-bottom: 16px" />
+
     <el-empty v-if="!loading && campaigns.length === 0" description="暂无投放数据，请先配置千川 MCP 或生成报告" />
 
     <template v-else>

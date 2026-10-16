@@ -1,14 +1,17 @@
 package io.github.chenyouxin8.adreview.service;
 
 import io.github.chenyouxin8.adreview.common.BusinessException;
+import io.github.chenyouxin8.adreview.constant.DataSourceType;
 import io.github.chenyouxin8.adreview.constant.ReportType;
 import io.github.chenyouxin8.adreview.model.AccountSummary;
 import io.github.chenyouxin8.adreview.model.AdCampaign;
+import io.github.chenyouxin8.adreview.model.AiReportInsight;
 import io.github.chenyouxin8.adreview.model.NaturalQueryResult;
 import io.github.chenyouxin8.adreview.model.PageResult;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -19,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -62,18 +66,25 @@ public class ReportService {
         if (startDate.isBefore(LocalDate.now().minusYears(5)) || endDate.isAfter(LocalDate.now())) {
             throw new BusinessException(40003, "日期范围超出允许区间（最多追溯 5 年，且不能晚于今天）");
         }
-        List<AdCampaign> campaigns = qianchuanService.getCampaignReports(startDate, endDate);
-        AccountSummary summary = qianchuanService.getAccountSummary(startDate, endDate);
+
+        // 第一步：仅取数一次，并携带明确的数据来源标识
+        QianchuanService.CampaignFetchResult fetch = qianchuanService.fetchCampaigns(startDate, endDate);
+        List<AdCampaign> campaigns = fetch.campaigns();
+        DataSourceType dataSource = fetch.dataSource();
         if (campaigns.isEmpty()) throw new BusinessException(40001, "该时间段内没有投放数据");
+
+        // 第二步：基于同一份列表在内存聚合，彻底消除二次取数
+        AccountSummary summary = qianchuanService.calculateAccountSummary(campaigns, startDate, endDate);
+        summary.setDataSource(dataSource.name());
+        summary.setDegraded(false);
 
         List<ReviewReport.AbnormalItem> abnormalities = analysisService.detectAbnormalities(campaigns);
         List<AdCampaign> topCampaigns = analysisService.getTopCampaigns(campaigns, 5);
         List<AdCampaign> decliningCampaigns = analysisService.getDecliningCampaigns(campaigns, 5);
         ReviewReport.BudgetSuggestion budgetSuggestion = analysisService.generateBudgetSuggestion(campaigns, summary.getTotalCost() * 1.1);
 
-        String aiAnalysis = generateAiAnalysis(summary, campaigns, abnormalities, topCampaigns);
-        List<String> suggestions = generateAiSuggestions(summary, abnormalities, topCampaigns, decliningCampaigns);
-        String overview = generateOverview(summary, startDate, endDate, type);
+        // 第三步：单次强 Schema 结构化调用，一次产出概览 / 深度分析 / 建议
+        AiInsightResult insightResult = generateAiInsight(summary, abnormalities, topCampaigns);
 
         ReviewReport report = new ReviewReport();
         report.setReportId(UUID.randomUUID().toString().replace("-", ""));
@@ -82,70 +93,111 @@ public class ReportService {
         report.setEndDate(endDate);
         report.setGeneratedAt(LocalDateTime.now());
         report.setSummary(summary);
-        report.setOverview(overview);
+        report.setOverview(insightResult.insight().overview());
         report.setAbnormalItems(abnormalities);
         report.setTopCampaigns(topCampaigns);
         report.setDecliningCampaigns(decliningCampaigns);
-        report.setSuggestions(suggestions);
+        report.setSuggestions(insightResult.insight().actionableSuggestions());
         report.setBudgetSuggestion(budgetSuggestion);
-        report.setAiAnalysis(aiAnalysis);
+        report.setAiAnalysis(insightResult.insight().deepAnalysis());
+        report.setDataSource(dataSource.name());
+        report.setDegraded(insightResult.degraded());
         storageService.saveReport(report);
         return report;
     }
 
-    private String generateOverview(AccountSummary summary, LocalDate start, LocalDate end, ReportType type) {
-        String prompt = String.format("你是资深抖音投流运营专家，根据数据生成%s概览（150字内）：周期%s至%s，消耗%.2f元，展示%d，点击%d，CTR%.2f%%，CPC%.2f元，转化%d，CPA%.2f元，GMV%.2f元，ROI%.2f，异常计划%d个。要求：先评价好坏，再指出1-2个亮点或问题。",
-                type.getDesc(), start, end, summary.getTotalCost(), summary.getTotalShow(), summary.getTotalClick(),
-                summary.getOverallCtr(), summary.getOverallCpc(), summary.getTotalConvert(), summary.getOverallCpa(),
-                summary.getTotalGmv(), summary.getOverallRoi(), summary.getAbnormalCampaignCount());
-        try { return chatClient.prompt().user(prompt).call().content(); }
-        catch (Exception e) { return String.format("%s投放概览：消耗%.2f元，ROI%.2f，%d个计划异常。", type.getDesc(), summary.getTotalCost(), summary.getOverallRoi(), summary.getAbnormalCampaignCount()); }
+    /** 单次结构化调用的结果：洞察内容 + 是否降级。 */
+    private record AiInsightResult(AiReportInsight insight, boolean degraded) {
     }
 
-    private String generateAiAnalysis(AccountSummary summary, List<AdCampaign> campaigns,
-                                      List<ReviewReport.AbnormalItem> abnormalities, List<AdCampaign> topCampaigns) {
+    /**
+     * 单次 LLM 结构化调用生成复盘洞察。
+     * <p>失败时记录完整 error 日志（含耗时），并降级为基于规则计算的确定性结论，
+     * 同时将降级状态透传给上层，绝不静默吞掉。</p>
+     */
+    private AiInsightResult generateAiInsight(AccountSummary summary,
+                                              List<ReviewReport.AbnormalItem> abnormalities,
+                                              List<AdCampaign> topCampaigns) {
         StringBuilder data = new StringBuilder();
-        data.append("账户汇总：消耗").append(String.format("%.2f", summary.getTotalCost())).append("元，ROI").append(String.format("%.2f", summary.getOverallRoi())).append("\n");
+        data.append("账户汇总：消耗").append(fmt(summary.getTotalCost())).append("元，ROI").append(fmt(summary.getOverallRoi()))
+                .append("，CTR").append(fmt(summary.getOverallCtr())).append("%，CPA").append(fmt(summary.getOverallCpa())).append("元\n");
         data.append("TOP计划：\n");
-        for (AdCampaign c : topCampaigns) data.append("- ").append(c.getCampaignName()).append(": ROI").append(String.format("%.2f", c.getPayOrderRoi())).append("\n");
+        for (AdCampaign c : topCampaigns) {
+            data.append("- ").append(c.getCampaignName()).append(": ROI").append(fmt(c.getPayOrderRoi())).append("\n");
+        }
         data.append("异常项：\n");
-        for (ReviewReport.AbnormalItem item : abnormalities) data.append("- ").append(item.getCampaignName()).append(": ").append(item.getDescription()).append("\n");
-        String prompt = String.format("你是资深千川投流分析师，根据数据深度分析：\n%s\n要求：1.整体表现评价 2.优质计划共性 3.异常原因推测 4.趋势判断，400字内分点论述。", data);
-        try { return chatClient.prompt().user(prompt).call().content(); }
-        catch (Exception e) { return "AI分析服务暂时不可用，请查看数据明细。"; }
+        for (ReviewReport.AbnormalItem item : abnormalities) {
+            data.append("- ").append(item.getCampaignName()).append(": ").append(item.getDescription()).append("\n");
+        }
+        long start = System.currentTimeMillis();
+        try {
+            BeanOutputConverter<AiReportInsight> converter = new BeanOutputConverter<>(AiReportInsight.class);
+            String prompt = String.format("""
+                    你是资深千川投流分析师，请根据以下投放数据一次性生成复盘洞察。
+                    %s
+                    请严格按照以下 JSON Schema 输出 JSON 对象，不要输出任何额外解释文字：
+                    %s
+                    """, data, converter.getFormat());
+            String content = chatClient.prompt().user(prompt).call().content();
+            AiReportInsight insight = converter.convert(content);
+            if (insight == null) {
+                throw new IllegalStateException("AI 结构化输出解析结果为空");
+            }
+            log.info("AI 复盘洞察生成成功，耗时 {} ms", System.currentTimeMillis() - start);
+            return new AiInsightResult(insight, false);
+        } catch (Exception e) {
+            log.error("AI 复盘洞察生成失败，耗时 {} ms，已降级为规则结论", System.currentTimeMillis() - start, e);
+            return new AiInsightResult(buildFallbackInsight(summary, abnormalities), true);
+        }
     }
 
-    private List<String> generateAiSuggestions(AccountSummary summary, List<ReviewReport.AbnormalItem> abnormalities,
-                                               List<AdCampaign> topCampaigns, List<AdCampaign> decliningCampaigns) {
-        String prompt = String.format("你是资深千川投流优化师，整体ROI%.2f，异常计划%d个，给出3-5条具体可执行的优化建议，涵盖预算、出价、素材、人群维度，每条不超50字。", summary.getOverallRoi(), abnormalities.size());
-        try {
-            String result = chatClient.prompt().user(prompt).call().content();
-            List<String> suggestions = new ArrayList<>();
-            for (String line : result.split("\n")) {
-                line = line.trim();
-                if (!line.isEmpty() && (line.startsWith("-") || line.matches("^\\d+[.、].*")))
-                    suggestions.add(line.replaceAll("^[-\\d.、]+\\s*", ""));
-            }
-            return suggestions.isEmpty() ? List.of("优化异常计划，加大优质计划预算") : suggestions;
-        } catch (Exception e) { return List.of("暂停低ROI计划", "加大优质计划预算"); }
+    /**
+     * 基于本地规则计算出确定性兜底结论，保证降级时报告依旧可用且可解释。
+     */
+    private AiReportInsight buildFallbackInsight(AccountSummary summary, List<ReviewReport.AbnormalItem> abnormalities) {
+        int abnormalCount = summary.getAbnormalCampaignCount() != null ? summary.getAbnormalCampaignCount() : abnormalities.size();
+        String overview = String.format("投放概览：消耗%s元，ROI%s，异常计划%d个。",
+                fmt(summary.getTotalCost()), fmt(summary.getOverallRoi()), abnormalCount);
+        String deepAnalysis = abnormalities.isEmpty()
+                ? "本周期未识别到明显异常计划，整体投放平稳，建议维持当前预算结构并持续监控 ROI 波动。"
+                : String.format("本周期识别到 %d 个异常计划，主要问题为：%s。建议优先调整高消耗低效计划，再逐步优化出价与素材。",
+                        abnormalities.size(),
+                        abnormalities.stream().map(ReviewReport.AbnormalItem::getDescription).limit(3).collect(Collectors.joining("；")));
+        List<String> suggestions = abnormalities.stream()
+                .map(i -> i.getCampaignName() + "：" + i.getSuggestion())
+                .distinct()
+                .limit(5)
+                .collect(Collectors.toList());
+        if (suggestions.isEmpty()) {
+            suggestions = List.of("维持当前预算结构，持续监控 ROI 波动", "对高消耗计划做小步出价测试");
+        }
+        return new AiReportInsight(overview, deepAnalysis, suggestions);
+    }
+
+    private String fmt(Double v) {
+        return String.format("%.2f", v != null ? v : 0.0);
     }
 
     public NaturalQueryResult naturalQuery(String question, LocalDate date) {
         if (question == null || question.isBlank()) {
             throw new BusinessException(40004, "查询问题不能为空");
         }
-        List<AdCampaign> campaigns = qianchuanService.getCampaignReports(date, date);
-        AccountSummary summary = qianchuanService.getAccountSummary(date, date);
+        QianchuanService.CampaignFetchResult fetch = qianchuanService.fetchCampaigns(date, date);
+        List<AdCampaign> campaigns = fetch.campaigns();
+        AccountSummary summary = qianchuanService.calculateAccountSummary(campaigns, date, date);
+        summary.setDataSource(fetch.dataSource().name());
         StringBuilder data = new StringBuilder();
-        data.append("账户汇总：消耗").append(String.format("%.2f", summary.getTotalCost())).append("元，ROI").append(String.format("%.2f", summary.getOverallRoi())).append("\n");
-        for (AdCampaign c : campaigns) data.append("- ").append(c.getCampaignName()).append(": 消耗").append(String.format("%.0f", c.getCost())).append("元，ROI").append(String.format("%.2f", c.getPayOrderRoi())).append("\n");
+        data.append("账户汇总：消耗").append(fmt(summary.getTotalCost())).append("元，ROI").append(fmt(summary.getOverallRoi())).append("\n");
+        for (AdCampaign c : campaigns) {
+            data.append("- ").append(c.getCampaignName()).append(": 消耗").append(fmt(c.getCost())).append("元，ROI").append(fmt(c.getPayOrderRoi())).append("\n");
+        }
         String prompt = String.format("你是千川投流数据助手，用户问：%s\n数据：%s\n请直接回答，200字内。", question, data);
         NaturalQueryResult result = new NaturalQueryResult();
         result.setQuestion(question);
         result.setIntent(detectIntent(question));
         result.setData(data.toString());
         try { result.setAnswer(chatClient.prompt().user(prompt).call().content()); }
-        catch (Exception e) { result.setAnswer("AI服务不可用，今日消耗" + String.format("%.2f", summary.getTotalCost()) + "元，ROI" + String.format("%.2f", summary.getOverallRoi())); }
+        catch (Exception e) { result.setAnswer("AI服务不可用，今日消耗" + fmt(summary.getTotalCost()) + "元，ROI" + fmt(summary.getOverallRoi())); }
         result.setRelatedCampaigns(campaigns);
         return result;
     }
