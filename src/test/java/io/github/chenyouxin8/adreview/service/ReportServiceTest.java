@@ -3,6 +3,7 @@ package io.github.chenyouxin8.adreview.service;
 import io.github.chenyouxin8.adreview.constant.DataSourceType;
 import io.github.chenyouxin8.adreview.model.AccountSummary;
 import io.github.chenyouxin8.adreview.model.AdCampaign;
+import io.github.chenyouxin8.adreview.model.NaturalQueryResult;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,7 @@ import org.springframework.ai.chat.client.ChatClient;
 
 import java.lang.reflect.Field;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -95,6 +97,68 @@ class ReportServiceTest {
 
     private void stubAiContent(String content) {
         when(chatClient.prompt().user(anyString()).call().content()).thenReturn(content);
+    }
+
+    /** 供 naturalQuery 用例使用的 6 个计划：消耗 100~600，ROI 1.0~6.0。 */
+    private List<AdCampaign> queryCampaigns() {
+        List<AdCampaign> list = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            AdCampaign c = new AdCampaign();
+            c.setCampaignId(20001L + i);
+            c.setCampaignName("查询计划-" + i);
+            c.setStatDate(date);
+            c.setCost(100.0 * (i + 1));
+            c.setPayOrderRoi(1.0 + i);
+            c.setPayOrderAmount(100.0 * (i + 1));
+            list.add(c);
+        }
+        return list;
+    }
+
+    /** 桩：取数返回指定来源与计划列表，并给定汇总计算结果。 */
+    private void stubQueryFetch(DataSourceType source) {
+        when(qianchuanService.fetchCampaigns(any(), any()))
+                .thenReturn(new QianchuanService.CampaignFetchResult(queryCampaigns(), source));
+        when(qianchuanService.calculateAccountSummary(any(), any(), any())).thenReturn(sampleSummary());
+    }
+
+    @Test
+    void naturalQuery_whenAiSucceeds_returnsAiAnswerWithoutDegrade() {
+        stubQueryFetch(DataSourceType.LOCAL_IMPORT);
+        // Tool Calling 链路上多一层 .tools(...)，需显式桩到最终 content()
+        when(chatClient.prompt().user(anyString()).tools(any()).call().content())
+                .thenReturn("这是 AI 基于本地工具得出的回答");
+
+        NaturalQueryResult result = reportService.naturalQuery("哪个计划 ROI 最高？", date, date);
+
+        assertEquals("这是 AI 基于本地工具得出的回答", result.getAnswer());
+        assertFalse(result.getDegraded());
+        assertEquals("LOCAL_IMPORT", result.getDataSource());
+        // 取数仅发生一次，工具直接消费内存列表，零重复取数
+        verify(qianchuanService, times(1)).fetchCampaigns(any(), any());
+        // 用例中 Mock 不会真正触发工具，故 AI 仅回答汇总 → 默认取消耗最高的前 5 条
+        assertEquals(5, result.getRelatedCampaigns().size());
+        assertEquals(20006L, result.getRelatedCampaigns().get(0).getCampaignId());
+        assertEquals("general", result.getIntent());
+        assertTrue(result.getInvokedTools().isEmpty());
+    }
+
+    @Test
+    void naturalQuery_whenAiThrows_thenDegradedWithLocalRuleFallback() {
+        stubQueryFetch(DataSourceType.MOCK_FALLBACK);
+        when(chatClient.prompt().user(anyString()).tools(any()).call().content())
+                .thenThrow(new RuntimeException("LLM 服务不可用"));
+
+        NaturalQueryResult result = reportService.naturalQuery("今天整体投放怎么样？", date, date);
+
+        // 降级被显式标记，且数据来源如实透传
+        assertTrue(result.getDegraded());
+        assertEquals("MOCK_FALLBACK", result.getDataSource());
+        // 兜底回答基于本地规则拼装，绝不返回“AI服务不可用”这类空话
+        assertNotNull(result.getAnswer());
+        assertTrue(result.getAnswer().contains("本地规则汇总"));
+        assertTrue(result.getAnswer().contains("查询计划-5"));
+        assertFalse(result.getRelatedCampaigns().isEmpty());
     }
 
     @Test

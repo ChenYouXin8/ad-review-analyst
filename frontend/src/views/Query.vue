@@ -12,6 +12,14 @@
     </div>
     <div v-if="result" class="card">
       <h3 style="margin-bottom:12px">🤖 AI 回答 <el-tag v-if="result.intent" size="small" style="margin-left:8px">{{ intentLabel(result.intent) }}</el-tag></h3>
+      <el-alert v-if="result.dataSource === 'MOCK_FALLBACK'" type="warning" :closable="false" show-icon
+        title="当前展示为模拟演示数据（未连接千川 MCP）" style="margin-bottom: 12px" />
+      <el-alert v-if="result.degraded === true" type="warning" :closable="false" show-icon
+        title="AI 深度分析服务降级，当前展示为基础规则结论" style="margin-bottom: 12px" />
+      <div v-if="result.invokedTools?.length" style="margin-bottom:12px">
+        <span style="color:#888;font-size:13px;margin-right:8px">Agent 已调用工具：</span>
+        <el-tag v-for="t in result.invokedTools" :key="t" size="small" type="info" style="margin-right:6px">{{ t }}</el-tag>
+      </div>
       <div style="background:#f0f9ff;padding:16px;border-radius:8px;line-height:1.8">{{ result.answer }}</div>
       <el-divider />
       <h4 style="margin-bottom:12px">相关计划数据</h4>
@@ -37,7 +45,10 @@ const loading = ref(false)
 const quickQuestions = ['今天整体ROI怎么样？', '哪个计划消耗最多？', 'ROI最低的计划是哪个？', '有哪些计划需要暂停？']
 
 const intentLabel = intent => ({
-  abnormal_detect: '异常诊断',
+  abnormal_check: '异常诊断',
+  campaign_ranking: '计划排行',
+  campaign_search: '计划检索',
+  account_overview: '账户总览',
   cost_analysis: '消耗分析',
   roi_analysis: 'ROI 分析',
   conversion_analysis: '转化分析',

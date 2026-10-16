@@ -9,6 +9,7 @@ import io.github.chenyouxin8.adreview.model.AiReportInsight;
 import io.github.chenyouxin8.adreview.model.NaturalQueryResult;
 import io.github.chenyouxin8.adreview.model.PageResult;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
+import io.github.chenyouxin8.adreview.tool.AdDataAnalyticsTools;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.converter.BeanOutputConverter;
@@ -18,9 +19,8 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -178,42 +178,110 @@ public class ReportService {
         return String.format("%.2f", v != null ? v : 0.0);
     }
 
+    /** 兼容单日查询的旧签名。 */
     public NaturalQueryResult naturalQuery(String question, LocalDate date) {
+        return naturalQuery(question, date, date);
+    }
+
+    /**
+     * 基于 Spring AI Tool Calling 的自然语言问答。
+     * <p>不再把全量计划拼接进 Prompt（消除长文本膨胀），也不再依赖关键词 if-else 识别意图
+     * （消除伪 NLU）。AI 必须通过调用 {@link AdDataAnalyticsTools} 暴露的本地工具获取真实数据后作答，
+     * 工具调用轨迹与命中计划会被自动收集，供前端展示与结果组装。</p>
+     */
+    public NaturalQueryResult naturalQuery(String question, LocalDate startDate, LocalDate endDate) {
         if (question == null || question.isBlank()) {
             throw new BusinessException(40004, "查询问题不能为空");
         }
-        QianchuanService.CampaignFetchResult fetch = qianchuanService.fetchCampaigns(date, date);
+        // 第一步：仅取数一次，同一份列表同时用于汇总与工具上下文的构造
+        QianchuanService.CampaignFetchResult fetch = qianchuanService.fetchCampaigns(startDate, endDate);
         List<AdCampaign> campaigns = fetch.campaigns();
-        AccountSummary summary = qianchuanService.calculateAccountSummary(campaigns, date, date);
+        AccountSummary summary = qianchuanService.calculateAccountSummary(campaigns, startDate, endDate);
         summary.setDataSource(fetch.dataSource().name());
-        StringBuilder data = new StringBuilder();
-        data.append("账户汇总：消耗").append(fmt(summary.getTotalCost())).append("元，ROI").append(fmt(summary.getOverallRoi())).append("\n");
-        for (AdCampaign c : campaigns) {
-            data.append("- ").append(c.getCampaignName()).append(": 消耗").append(fmt(c.getCost())).append("元，ROI").append(fmt(c.getPayOrderRoi())).append("\n");
-        }
-        String prompt = String.format("你是千川投流数据助手，用户问：%s\n数据：%s\n请直接回答，200字内。", question, data);
+
+        // 第二步：构造请求级工具上下文（零重复取数，且能收集调用轨迹）
+        AdDataAnalyticsTools toolContext = new AdDataAnalyticsTools(campaigns, summary, analysisService);
+
         NaturalQueryResult result = new NaturalQueryResult();
         result.setQuestion(question);
-        result.setIntent(detectIntent(question));
-        result.setData(data.toString());
-        try { result.setAnswer(chatClient.prompt().user(prompt).call().content()); }
-        catch (Exception e) { result.setAnswer("AI服务不可用，今日消耗" + fmt(summary.getTotalCost()) + "元，ROI" + fmt(summary.getOverallRoi())); }
-        result.setRelatedCampaigns(campaigns);
+        result.setDataSource(fetch.dataSource().name());
+        result.setDegraded(false);
+
+        long start = System.currentTimeMillis();
+        try {
+            String answer = chatClient.prompt()
+                    .user(buildQueryPrompt(question, startDate, endDate, campaigns.size()))
+                    .tools(toolContext)
+                    .call()
+                    .content();
+            if (answer == null || answer.isBlank()) {
+                throw new IllegalStateException("AI 返回内容为空");
+            }
+            result.setAnswer(answer);
+            log.info("自然语言问答成功，耗时 {} ms，调用工具 {}",
+                    System.currentTimeMillis() - start, toolContext.getInvokedTools());
+        } catch (Exception e) {
+            // 优雅降级：记录含耗时的 error 日志，改用本地规则汇总，绝不返回空话
+            log.error("自然语言问答失败，耗时 {} ms，已降级为本地规则回答", System.currentTimeMillis() - start, e);
+            result.setDegraded(true);
+            result.setAnswer(buildFallbackAnswer(summary, campaigns));
+        }
+
+        result.setIntent(mapIntent(toolContext.getInvokedTools()));
+        result.setInvokedTools(toolContext.getInvokedTools());
+        // 相关计划优先取工具命中的计划；若 AI 仅回答汇总未触发计划级工具，则默认取消耗最高的前 5 条
+        List<AdCampaign> related = toolContext.getReferencedCampaigns();
+        if (related.isEmpty()) {
+            related = campaigns.stream()
+                    .sorted(Comparator.comparingDouble((AdCampaign c) -> c.getCost() != null ? c.getCost() : 0d).reversed())
+                    .limit(5)
+                    .collect(Collectors.toList());
+        }
+        result.setRelatedCampaigns(related.stream().limit(10).collect(Collectors.toList()));
         return result;
     }
 
     /**
-     * 简单规则识别查询意图，供前端展示和后续扩展
+     * 构建精简、专业的问答 Prompt：仅告知范围与规模，要求 AI 必须调用工具取真实数据。
      */
-    private String detectIntent(String question) {
-        String q = question.toLowerCase(Locale.ROOT);
-        if (q.contains("暂停") || q.contains("废") || q.contains("跑") || q.contains("停")) return "abnormal_detect";
-        if (q.contains("消耗") || q.contains("花钱") || q.contains("花费")) return "cost_analysis";
-        if (q.contains("roi") || q.contains("投产")) return "roi_analysis";
-        if (q.contains("转化") || q.contains("下单")) return "conversion_analysis";
-        if (q.contains("点击") || q.contains("ctr")) return "traffic_analysis";
-        if (q.contains("对比") || q.contains("哪个") || q.contains("最好") || q.contains("最差")) return "campaign_compare";
+    private String buildQueryPrompt(String question, LocalDate startDate, LocalDate endDate, int campaignCount) {
+        return String.format("""
+                你是资深千川投流数据分析师，正在为用户解答投放数据问题。
+                数据范围：%s ~ %s，共 %d 个广告计划。
+                你必须先调用提供的工具获取真实数据，再依据工具返回的数据作答；严禁凭空编造任何数字。
+                若工具未覆盖用户问题涉及的维度，请如实说明无法从现有数据得出。
+                回答要求：结论先行、条理清晰，控制在 250 字以内。
+
+                用户问题：%s
+                """, startDate, endDate, campaignCount, question);
+    }
+
+    /**
+     * 基于本次实际调用的工具动态推断查询类型，替代硬编码的关键词匹配。
+     */
+    private String mapIntent(List<String> invokedTools) {
+        if (invokedTools.contains("findAbnormalCampaigns")) return "abnormal_check";
+        if (invokedTools.contains("queryCampaignsByMetric")) return "campaign_ranking";
+        if (invokedTools.contains("searchCampaignByKeyword")) return "campaign_search";
+        if (invokedTools.contains("getAccountOverview")) return "account_overview";
         return "general";
+    }
+
+    /**
+     * 基于本地规则拼装可读的兜底回答：大盘汇总 + 异常数 + 最高 ROI 计划。
+     */
+    private String buildFallbackAnswer(AccountSummary summary, List<AdCampaign> campaigns) {
+        int abnormalCount = summary.getAbnormalCampaignCount() != null
+                ? summary.getAbnormalCampaignCount() : 0;
+        AdCampaign topRoi = campaigns.stream()
+                .filter(c -> c.getPayOrderRoi() != null)
+                .max(Comparator.comparingDouble(AdCampaign::getPayOrderRoi))
+                .orElse(null);
+        String topDesc = topRoi != null
+                ? String.format("，其中 ROI 最高的计划为「%s」（ROI %s）", topRoi.getCampaignName(), fmt(topRoi.getPayOrderRoi()))
+                : "";
+        return String.format("（AI 服务暂不可用，以下为本地规则汇总）本周期共 %d 个计划，总消耗 ¥%s，整体 ROI %s，异常计划 %d 个%s。",
+                campaigns.size(), fmt(summary.getTotalCost()), fmt(summary.getOverallRoi()), abnormalCount, topDesc);
     }
 
     public PageResult<ReviewReport> getHistoryReports(int page, int size) {
