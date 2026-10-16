@@ -19,7 +19,16 @@ api.interceptors.response.use(
 
 export const dataApi = {
   getSummary: (date) => api.get('/data/summary', { params: { date } }),
-  getCampaigns: (startDate, endDate) => api.get('/data/campaigns', { params: { startDate, endDate } })
+  getCampaigns: (startDate, endDate) => api.get('/data/campaigns', { params: { startDate, endDate } }),
+  importCsv: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post('/data/import-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000
+    })
+  },
+  templateUrl: () => `${api.defaults.baseURL}/data/csv-template`
 }
 
 export const reportApi = {

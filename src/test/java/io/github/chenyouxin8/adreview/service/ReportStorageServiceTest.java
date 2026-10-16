@@ -5,33 +5,35 @@ import io.github.chenyouxin8.adreview.model.AdCampaign;
 import io.github.chenyouxin8.adreview.model.ReviewReport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
-import java.lang.reflect.Field;
-import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class ReportStorageServiceTest {
 
-    @TempDir
-    Path tempDir;
-
     private ReportStorageService storageService;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
+        // 每个用例使用独立的内存库，保证隔离
+        String url = "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1;MODE=MySQL";
+        DriverManagerDataSource dataSource = new DriverManagerDataSource(url, "sa", "");
+        dataSource.setDriverClassName("org.h2.Driver");
+        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
+
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
         ObjectMapper mapper = JsonMapper.builder().build();
-        storageService = new ReportStorageService(mapper);
-        Field f = ReportStorageService.class.getDeclaredField("storagePath");
-        f.setAccessible(true);
-        f.set(storageService, tempDir.toString());
-        storageService.init();
+        storageService = new ReportStorageService(jdbcTemplate, mapper);
     }
 
     private ReviewReport sampleReport(String id) {
@@ -115,6 +117,18 @@ class ReportStorageServiceTest {
     }
 
     @Test
+    void listReports_filterByReportType() {
+        storageService.saveReport(sampleReport("d1"));
+        ReviewReport weekly = sampleReport("w1");
+        weekly.setReportType("weekly");
+        storageService.saveReport(weekly);
+
+        assertEquals(1, storageService.listReports(1, 10, "weekly").size());
+        assertEquals(1, storageService.countReports("weekly"));
+        assertEquals(2, storageService.countReports());
+    }
+
+    @Test
     void invalidReportId_rejected() {
         assertThrows(BusinessException.class, () -> storageService.saveReport(sampleReport("../evil")));
         assertThrows(BusinessException.class, () -> storageService.getReport("../evil"));
@@ -137,5 +151,18 @@ class ReportStorageServiceTest {
         assertEquals(1, loaded.getTopCampaigns().size());
         assertEquals("测试计划", loaded.getTopCampaigns().get(0).getCampaignName());
         assertEquals(2.5, loaded.getTopCampaigns().get(0).getPayOrderRoi(), 0.001);
+    }
+
+    @Test
+    void saveReport_upsertUpdatesExistingPayload() {
+        ReviewReport report = sampleReport("report004");
+        report.setOverview("旧概览");
+        storageService.saveReport(report);
+
+        report.setOverview("新概览");
+        storageService.saveReport(report);
+
+        assertEquals(1, storageService.countReports());
+        assertEquals("新概览", storageService.getReport("report004").getOverview());
     }
 }

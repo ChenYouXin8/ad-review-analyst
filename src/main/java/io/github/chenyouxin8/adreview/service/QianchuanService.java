@@ -4,6 +4,7 @@ import io.github.chenyouxin8.adreview.common.BusinessException;
 import io.github.chenyouxin8.adreview.constant.DataSourceType;
 import io.github.chenyouxin8.adreview.model.AccountSummary;
 import io.github.chenyouxin8.adreview.model.AdCampaign;
+import io.github.chenyouxin8.adreview.repository.CampaignRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -26,6 +27,7 @@ public class QianchuanService {
 
     private final ChatClient chatClient;
     private final ToolCallbackProvider mcpToolProvider;
+    private final CampaignRepository campaignRepository;
 
     @Value("${ad-review.roi-threshold:1.5}")
     private double roiThreshold;
@@ -39,9 +41,11 @@ public class QianchuanService {
 
     @Autowired
     public QianchuanService(ChatClient.Builder chatClientBuilder,
-                            @Autowired(required = false) ToolCallbackProvider mcpToolProvider) {
+                            @Autowired(required = false) ToolCallbackProvider mcpToolProvider,
+                            CampaignRepository campaignRepository) {
         this.chatClient = chatClientBuilder.build();
         this.mcpToolProvider = mcpToolProvider;
+        this.campaignRepository = campaignRepository;
     }
 
     /**
@@ -61,16 +65,27 @@ public class QianchuanService {
     }
 
     /**
-     * 拉取千川计划报表，并显式返回本次数据来源类型。
-     * <p>配置了 MCP 工具时，通过 AI + 千川 MCP 工具获取真实数据，并使用结构化输出解析为
-     * {@link AdCampaign} 列表，来源标记为 {@link DataSourceType#MCP_LIVE}；
-     * 未配置或调用失败时（可配置）返回模拟数据，来源标记为 {@link DataSourceType#MOCK_FALLBACK}。</p>
+     * 拉取千川计划报表，并按优先级路由数据来源：
+     * <ol>
+     *   <li><b>本地导入数据</b>：{@link CampaignRepository} 在 [startDate, endDate] 内有数据 → {@link DataSourceType#LOCAL_IMPORT}（不消耗 LLM Token）；</li>
+     *   <li><b>千川 MCP 实时数据</b>：本地库无该时段数据且 MCP 工具可用 → {@link DataSourceType#MCP_LIVE}；</li>
+     *   <li><b>Mock 兜底</b>：前两者均不可用且允许兜底 → {@link DataSourceType#MOCK_FALLBACK}。</li>
+     * </ol>
      */
     public CampaignFetchResult fetchCampaigns(LocalDate startDate, LocalDate endDate) {
         if (startDate.isAfter(endDate)) {
             throw new BusinessException(40002, "开始日期不能晚于结束日期");
         }
         log.info("拉取千川计划报表: {} ~ {}", startDate, endDate);
+
+        // 优先级 1：本地已导入的真实数据
+        List<AdCampaign> local = campaignRepository.findByDateRange(startDate, endDate);
+        if (!local.isEmpty()) {
+            log.info("命中本地导入数据，共 {} 条", local.size());
+            return new CampaignFetchResult(local, DataSourceType.LOCAL_IMPORT);
+        }
+
+        // 优先级 2：千川 MCP 实时数据
         ToolCallback[] tools = resolveMcpTools();
         if (tools == null) {
             log.warn("千川 MCP 工具不可用，返回模拟数据");

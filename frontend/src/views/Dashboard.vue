@@ -2,6 +2,15 @@
   <div v-loading="loading">
     <h1 class="page-title">数据概览</h1>
 
+    <div class="card" style="margin-bottom: 16px">
+      <el-upload :show-file-list="false" :auto-upload="false" accept=".csv" :on-change="handleImportCsv" style="display: inline-block; margin-right: 8px">
+        <el-button type="primary" :loading="uploading">导入 CSV 报表</el-button>
+      </el-upload>
+      <el-button @click="downloadTemplate">下载标准 CSV 模板</el-button>
+    </div>
+
+    <el-alert v-if="summary.dataSource === 'LOCAL_IMPORT'" type="success" :closable="false" show-icon
+      title="当前正在使用已导入的本地真实投放报表数据" style="margin-bottom: 16px" />
     <el-alert v-if="summary.dataSource === 'MOCK_FALLBACK'" type="warning" :closable="false" show-icon
       title="当前展示为模拟演示数据（未连接千川 MCP）" style="margin-bottom: 16px" />
     <el-alert v-if="summary.degraded === true" type="warning" :closable="false" show-icon
@@ -58,6 +67,7 @@ import { GridComponent, TooltipComponent, MarkLineComponent } from 'echarts/comp
 import { CanvasRenderer } from 'echarts/renderers'
 import { dataApi, configApi } from '../utils/api'
 import dayjs from 'dayjs'
+import { ElMessage } from 'element-plus'
 
 echarts.use([BarChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer])
 
@@ -65,6 +75,7 @@ const summary = ref({})
 const campaigns = ref([])
 const config = ref({ roiThreshold: 1.5, cpaThreshold: 100, ctrThreshold: 1.0 })
 const loading = ref(false)
+const uploading = ref(false)
 const costChartRef = ref(null)
 const roiChartRef = ref(null)
 let costChart = null
@@ -113,8 +124,7 @@ const renderCharts = () => {
 
 const handleResize = () => { costChart?.resize(); roiChart?.resize() }
 
-onMounted(async () => {
-  window.addEventListener('resize', handleResize)
+const loadData = async () => {
   loading.value = true
   try {
     const [cfg, s, c] = await Promise.all([
@@ -129,6 +139,26 @@ onMounted(async () => {
     renderCharts()
   } catch (e) { console.error(e) }
   finally { loading.value = false }
+}
+
+const handleImportCsv = async (uploadFile) => {
+  const raw = uploadFile?.raw
+  if (!raw) return
+  uploading.value = true
+  try {
+    const res = await dataApi.importCsv(raw)
+    const d = res.data || {}
+    ElMessage.success(`导入成功 ${d.importedCount ?? 0} 条，日期范围 ${d.startDate ?? '-'} ~ ${d.endDate ?? '-'}`)
+    await loadData()
+  } catch (e) { ElMessage.error(e.message || 'CSV 导入失败') }
+  finally { uploading.value = false }
+}
+
+const downloadTemplate = () => { window.open(dataApi.templateUrl(), '_blank') }
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+  loadData()
 })
 
 onBeforeUnmount(() => {
